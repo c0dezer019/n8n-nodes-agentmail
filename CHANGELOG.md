@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Trigger never fired.** The webhook read the event name from `body.type`, which AgentMail sets to the
+  constant string `"event"` on every delivery; the event name is in `body.event_type`. The comparison could
+  never match, so every delivery was discarded for every event and every user.
+- **Ignored deliveries hung the sender.** Non-matching events returned `noWebhookResponse: true`, which tells
+  n8n the node already wrote the HTTP response — it hadn't, so nothing was sent and the delivery stayed open
+  until it timed out. Ignored events now return an immediate HTTP 200 and start no workflow.
+- **Empty output on non-received events.** Message data was read from `body.data`/`body.message`, but each
+  AgentMail event nests its object under its own key (`message`, `send`, `delivery`, `bounce`, …) and there is
+  no `data` key. Sent, Delivered and Bounced produced empty fields, and an Inbox Filter on them dropped every
+  delivery.
+- **`timestamp` was always empty.** It was read from the envelope, which carries no timestamp; it lives on the
+  event object.
+- **Large emails arrived with no body.** Bodies over ~64KB are not inlined — `text`/`html` are omitted and a
+  signed URL is sent instead. That URL is now exposed as `bodyUrl` instead of being dropped.
+
+### Changed
+- Removed camelCase and `body` field fallbacks from the trigger output. AgentMail's payloads are snake_case
+  and carry no `body` field, so those branches could never be taken.
+- Documented which output fields are empty for Sent, Delivered and Bounced events.
+
 ## [1.0.0] - 2026-04-12
 
 ### Added

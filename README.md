@@ -119,7 +119,7 @@ When the trigger fires, you receive:
   "eventId": "evt_123",
   "timestamp": "2024-01-25T10:30:00Z",
   "messageId": "msg_456",
-  "inboxId": "inbox_789",
+  "inboxId": "your-inbox@agentmail.to",
   "threadId": "thread_012",
   "from": "sender@example.com",
   "to": ["agent@agentmail.to"],
@@ -130,6 +130,14 @@ When the trigger fires, you receive:
   "attachments": []
 }
 ```
+
+Only **Email Received** carries the full message. AgentMail's Sent, Delivered and Bounced events
+carry ids, recipients and a timestamp but no `subject`, `from`, `text`, `html`, `labels` or
+`attachments`, so those fields come through empty for those events. `rawPayload` always contains the
+complete webhook body.
+
+Emails with a body over ~64KB are not delivered inline: `text` and `html` are omitted and `bodyUrl`
+holds a signed, expiring URL to fetch the body instead.
 
 ## Resources
 

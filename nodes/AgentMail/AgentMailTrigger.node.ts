@@ -11,6 +11,25 @@ import {
 } from 'n8n-workflow';
 import type { ILoadOptionsFunctions, INodePropertyOptions, JsonObject } from 'n8n-workflow';
 
+// AgentMail nests each event's object under a key named after the event, not under a shared
+// envelope key. This covers AgentMail's full event enum, not just the four the Event dropdown
+// offers: the dropdown is an `options` parameter, so an expression can set `event` to any valid
+// event type, and create() will happily register it. An event missing from this map would fire
+// the workflow with every flattened field undefined.
+export const EVENT_PAYLOAD_KEY: Record<string, string> = {
+	'message.received': 'message',
+	'message.received.spam': 'message',
+	'message.received.blocked': 'message',
+	'message.received.unauthenticated': 'message',
+	'message.sent': 'send',
+	'message.delivered': 'delivery',
+	'message.bounced': 'bounce',
+	'message.complained': 'complaint',
+	'message.rejected': 'reject',
+	'message.opened': 'open',
+	'domain.verified': 'domain',
+};
+
 export class AgentMailTrigger implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'AgentMail Trigger',
@@ -240,45 +259,51 @@ export class AgentMailTrigger implements INodeType {
 		const event = this.getNodeParameter('event') as string;
 		const inboxFilter = this.getNodeParameter('inboxFilter') as string;
 
-		// Verify event type matches
-		const eventType = body.type || body.event;
+		// AgentMail's envelope sets `type` to the literal string "event" on every delivery and
+		// carries the event name in `event_type`. Matching on `type` therefore never matches.
+		const eventType = body.event_type;
 		if (eventType !== event) {
-			// Return 200 but don't trigger workflow
-			return {
-				noWebhookResponse: true,
-			};
+			// Not the subscribed event: ACK and start no workflow. An empty response makes n8n
+			// reply 200; `noWebhookResponse` would send nothing at all and hang the delivery
+			// until the sender times out, which AgentMail's Svix retries and eventually
+			// counts toward disabling the endpoint.
+			return {};
 		}
 
-		// Filter by inbox if specified
+		// Each event nests its object under its own key — there is no shared `data` key.
+		const messageData = (body[EVENT_PAYLOAD_KEY[event]] || {}) as IDataObject;
+
+		// Filter by inbox if specified. inbox_id is the inbox's email address, which is what
+		// the Inbox Filter dropdown stores as its option value.
 		if (inboxFilter) {
-			const messageData = (body.data || body.message || body) as IDataObject;
-			const inboxId = messageData.inbox_id || messageData.inboxId;
-			if (inboxId !== inboxFilter) {
-				return {
-					noWebhookResponse: true,
-				};
+			if (messageData.inbox_id !== inboxFilter) {
+				return {};
 			}
 		}
 
-		// Extract message data for easier access
-		const messageData = (body.data || body.message || {}) as IDataObject;
-		
 		// Return formatted data
 		return {
 			workflowData: [
 				this.helpers.returnJsonArray({
 					event: eventType,
-					eventId: body.event_id || body.eventId,
-					timestamp: body.timestamp,
-					// Message details
-					messageId: messageData.message_id || messageData.id,
-					inboxId: messageData.inbox_id || messageData.inboxId,
-					threadId: messageData.thread_id || messageData.threadId,
+					eventId: body.event_id,
+					// The envelope carries no top-level timestamp; it lives on the event object.
+					timestamp: messageData.timestamp,
+					// Message details. AgentMail's payloads are snake_case throughout, so there is
+					// no camelCase form to fall back to. Fields absent from a given event's object
+					// (a send carries no subject, for example) come through undefined; rawPayload
+					// below always has the whole body.
+					messageId: messageData.message_id,
+					inboxId: messageData.inbox_id,
+					threadId: messageData.thread_id,
 					from: messageData.from,
 					to: messageData.to,
 					subject: messageData.subject,
-					text: messageData.text || messageData.body,
+					text: messageData.text,
 					html: messageData.html,
+					// Bodies over ~64KB are not inlined: text/html are omitted and a signed URL is
+					// sent instead, so surface it rather than leaving the body silently empty.
+					bodyUrl: messageData.body_url,
 					// Labels and metadata
 					labels: messageData.labels,
 					attachments: messageData.attachments,
