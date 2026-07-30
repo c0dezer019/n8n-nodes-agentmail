@@ -15,6 +15,7 @@ describe('AgentMailTrigger webhook handler', () => {
 			message_id: 'msg_456',
 			inbox_id: 'agent@agentmail.to',
 			thread_id: 'thread_012',
+			timestamp: '2026-04-13T10:00:00Z',
 			from: 'sender@example.com',
 			to: ['agent@agentmail.to'],
 			subject: 'Hello',

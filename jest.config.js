@@ -12,6 +12,6 @@ module.exports = {
 	coverageDirectory: 'coverage',
 	coverageReporters: ['text', 'lcov', 'html'],
 	transform: {
-		'^.+\\.ts$': ['ts-jest', { isolatedModules: true }],
+		'^.+\\.ts$': ['ts-jest', {}],
 	},
 };

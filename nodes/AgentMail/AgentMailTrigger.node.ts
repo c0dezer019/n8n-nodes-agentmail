@@ -147,13 +147,25 @@ export class AgentMailTrigger implements INodeType {
 			async checkExists(this: IHookFunctions): Promise<boolean> {
 				const webhookUrl = this.getNodeWebhookUrl('default') as string;
 				const webhookData = this.getWorkflowStaticData('node');
+				const event = this.getNodeParameter('event') as string;
 				const baseUrl = 'https://api.agentmail.to/v0';
+
+				// A webhook "existing" is not enough — it must also be subscribed to the currently
+				// configured event. Otherwise, changing the Event dropdown (without a full
+				// deactivate/reactivate) leaves AgentMail delivering the OLD event_types: the call
+				// succeeds (200), but webhook()'s eventType check silently drops every delivery since
+				// it no longer matches the current parameter. Treat an event_types mismatch as "does
+				// not exist" so n8n re-runs create() with the right subscription.
+				const eventTypesMatch = (webhook: IDataObject): boolean => {
+					const eventTypes = (webhook.event_types || webhook.eventTypes || []) as string[];
+					return eventTypes.includes(event);
+				};
 
 				// Check if we have a stored webhook ID
 				if (webhookData.webhookId) {
 					try {
-						// Verify it still exists
-						await this.helpers.httpRequestWithAuthentication.call(
+						// Verify it still exists AND is still subscribed to the current event
+						const webhook = await this.helpers.httpRequestWithAuthentication.call(
 							this,
 							'agentMailApi',
 							{
@@ -161,7 +173,12 @@ export class AgentMailTrigger implements INodeType {
 								url: `${baseUrl}/webhooks/${webhookData.webhookId}`,
 								json: true,
 							},
-						);
+						) as IDataObject;
+
+						if (!eventTypesMatch(webhook)) {
+							delete webhookData.webhookId;
+							return false;
+						}
 						return true;
 					} catch {
 						// Webhook no longer exists
@@ -170,7 +187,7 @@ export class AgentMailTrigger implements INodeType {
 					}
 				}
 
-				// Check if any webhook matches our URL.
+				// Check if any webhook matches our URL and is subscribed to the current event.
 				// If listing fails (auth error, transient API issue), surface it instead of silently
 				// returning false — that would cause n8n to call create() and register a duplicate.
 				const response = await this.helpers.httpRequestWithAuthentication.call(
@@ -185,7 +202,7 @@ export class AgentMailTrigger implements INodeType {
 
 				const webhooks = (response.webhooks || response.data || []) as IDataObject[];
 				for (const webhook of webhooks) {
-					if (webhook.url === webhookUrl) {
+					if (webhook.url === webhookUrl && eventTypesMatch(webhook)) {
 						webhookData.webhookId = webhook.webhook_id || webhook.id;
 						return true;
 					}
@@ -202,6 +219,40 @@ export class AgentMailTrigger implements INodeType {
 
 				let response: IDataObject;
 				try {
+					// If a webhook already exists for this URL (e.g. the Event dropdown changed and
+					// checkExists() correctly flagged the event_types mismatch), PATCH it to the
+					// current event instead of POSTing a new one — otherwise every event change leaves
+					// an orphaned, still-active registration behind on AgentMail's side.
+					const existing = await this.helpers.httpRequestWithAuthentication.call(
+						this,
+						'agentMailApi',
+						{
+							method: 'GET' as IHttpRequestMethods,
+							url: `${baseUrl}/webhooks`,
+							json: true,
+						},
+					) as IDataObject;
+					const webhooks = (existing.webhooks || existing.data || []) as IDataObject[];
+					const match = webhooks.find((webhook) => webhook.url === webhookUrl);
+
+					if (match) {
+						const matchId = match.webhook_id || match.id;
+						response = await this.helpers.httpRequestWithAuthentication.call(
+							this,
+							'agentMailApi',
+							{
+								method: 'PATCH' as IHttpRequestMethods,
+								url: `${baseUrl}/webhooks/${matchId}`,
+								body: {
+									event_types: [event],
+								},
+								json: true,
+							},
+						) as IDataObject;
+						webhookData.webhookId = response.webhook_id || response.id || matchId;
+						return true;
+					}
+
 					response = await this.helpers.httpRequestWithAuthentication.call(
 						this,
 						'agentMailApi',
@@ -312,5 +363,6 @@ export class AgentMailTrigger implements INodeType {
 				}),
 			],
 		};
+
 	}
 }

@@ -8,11 +8,11 @@ describe('AgentMailTrigger webhook lifecycle', () => {
 	const testWebhookUrl = 'https://example.com/webhook/abc';
 
 	describe('checkExists', () => {
-		it('returns true when stored webhookId is verified by API', async () => {
+		it('returns true when stored webhookId is verified by API and event_types matches', async () => {
 			const ctx = createMockHookFunctions(
 				{ event: 'message.received' },
 				{ webhookId: 'wh_existing' },
-				{ webhook_id: 'wh_existing' },
+				{ webhook_id: 'wh_existing', event_types: ['message.received'] },
 				testWebhookUrl,
 			);
 
@@ -21,6 +21,29 @@ describe('AgentMailTrigger webhook lifecycle', () => {
 			expect(result).toBe(true);
 			const httpMock = (ctx as any).__httpRequestMock;
 			expect(httpMock.mock.calls[0][1].url).toBe(`${baseUrl}/webhooks/wh_existing`);
+		});
+
+		// Regression test: this is the actual root cause reported — AgentMail returns 200 on
+		// delivery (its registered webhook is real), but the trigger silently discards every
+		// event. Before this fix, checkExists only verified the webhook still existed by URL/ID;
+		// it never confirmed the registered event_types still matched the configured Event
+		// dropdown. If the Event param changed after activation (or the stored registration was
+		// otherwise made for a different event), n8n never re-ran create() to fix the
+		// subscription, so AgentMail kept delivering the OLD event_types forever while
+		// webhook()'s eventType check compared against the NEW param and dropped everything.
+		it('clears stored webhookId and returns false when stored webhook event_types no longer matches the configured event', async () => {
+			const staticData: any = { webhookId: 'wh_existing' };
+			const ctx = createMockHookFunctions(
+				{ event: 'message.received' },
+				staticData,
+				{ webhook_id: 'wh_existing', event_types: ['message.sent'] },
+				testWebhookUrl,
+			);
+
+			const result = await lifecycle.checkExists!.call(ctx);
+
+			expect(result).toBe(false);
+			expect(staticData.webhookId).toBeUndefined();
 		});
 
 		it('clears stale webhookId and returns false when verify fails (404)', async () => {
@@ -39,15 +62,15 @@ describe('AgentMailTrigger webhook lifecycle', () => {
 			expect(staticData.webhookId).toBeUndefined();
 		});
 
-		it('finds matching URL in webhook list when no stored ID', async () => {
+		it('finds matching URL + matching event_types in webhook list when no stored ID', async () => {
 			const staticData: any = {};
 			const ctx = createMockHookFunctions(
 				{ event: 'message.received' },
 				staticData,
 				{
 					webhooks: [
-						{ webhook_id: 'wh_other', url: 'https://different.example.com' },
-						{ webhook_id: 'wh_match', url: testWebhookUrl },
+						{ webhook_id: 'wh_other', url: 'https://different.example.com', event_types: ['message.received'] },
+						{ webhook_id: 'wh_match', url: testWebhookUrl, event_types: ['message.received'] },
 					],
 				},
 				testWebhookUrl,
@@ -59,11 +82,28 @@ describe('AgentMailTrigger webhook lifecycle', () => {
 			expect(staticData.webhookId).toBe('wh_match');
 		});
 
+		it('returns false when URL matches but event_types does not', async () => {
+			const staticData: any = {};
+			const ctx = createMockHookFunctions(
+				{ event: 'message.received' },
+				staticData,
+				{
+					webhooks: [{ webhook_id: 'wh_match', url: testWebhookUrl, event_types: ['message.sent'] }],
+				},
+				testWebhookUrl,
+			);
+
+			const result = await lifecycle.checkExists!.call(ctx);
+
+			expect(result).toBe(false);
+			expect(staticData.webhookId).toBeUndefined();
+		});
+
 		it('returns false when no matching webhook URL is in the list', async () => {
 			const ctx = createMockHookFunctions(
 				{ event: 'message.received' },
 				{},
-				{ webhooks: [{ webhook_id: 'wh_other', url: 'https://different.example.com' }] },
+				{ webhooks: [{ webhook_id: 'wh_other', url: 'https://different.example.com', event_types: ['message.received'] }] },
 				testWebhookUrl,
 			);
 
@@ -125,6 +165,37 @@ describe('AgentMailTrigger webhook lifecycle', () => {
 
 			await expect(lifecycle.create.call(ctx)).rejects.toThrow();
 			// The error should bubble up, not silently return false.
+		});
+
+		it('PATCHes the existing webhook instead of creating a duplicate when the URL is already registered under a different event', async () => {
+			const staticData: any = {};
+			const ctx = createMockHookFunctions(
+				{ event: 'message.received' },
+				staticData,
+				[
+					{ webhooks: [{ webhook_id: 'wh_existing', url: testWebhookUrl, event_types: ['message.sent'] }] },
+					{ webhook_id: 'wh_existing', event_types: ['message.received'] },
+				],
+				testWebhookUrl,
+			);
+
+			const result = await lifecycle.create.call(ctx);
+
+			expect(result).toBe(true);
+			const httpMock = (ctx as any).__httpRequestMock;
+			expect(httpMock).toHaveBeenCalledWith(
+				'agentMailApi',
+				expect.objectContaining({
+					method: 'PATCH',
+					url: `${baseUrl}/webhooks/wh_existing`,
+					body: { event_types: ['message.received'] },
+				}),
+			);
+			expect(httpMock).not.toHaveBeenCalledWith(
+				'agentMailApi',
+				expect.objectContaining({ method: 'POST' }),
+			);
+			expect(staticData.webhookId).toBe('wh_existing');
 		});
 
 		it('extracts webhook ID from any of webhook_id, id, or webhook.id', async () => {
